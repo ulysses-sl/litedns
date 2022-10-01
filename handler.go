@@ -4,6 +4,7 @@ import (
 	"log"
 	"strings"
 	"github.com/miekg/dns"
+	"time"
 )
 
 type Dispatcher interface {
@@ -72,27 +73,34 @@ func (cd *cachingDispatcher) supplyClients(clients []DNSClient) {
 
 func (cd *cachingDispatcher) handleDNSRequest() func(dns.ResponseWriter, *dns.Msg) {
 	return func(w dns.ResponseWriter, req *dns.Msg) {
+		startTime := time.Now().UnixMilli()
 		name := dns.CanonicalName(req.Question[0].Name)
 		qtypeStr := dns.TypeToString[req.Question[0].Qtype]
 		if strings.Count(name, ".") == 1 {
 			log.Printf(name + " " + qtypeStr + " : Local hostname lookup is forbidden\n")
 			w.WriteMsg(handleWithRcode(req, dns.RcodeServerFailure))
+			log.Printf("%s: responded in %d ms", name, (time.Now().UnixMilli() - startTime))
 			return
 		}
 		if isLocalIPLookup(name) {
 			log.Printf(name + " " + qtypeStr + " : Local IP lookup is forbidden\n")
 			w.WriteMsg(handleWithRcode(req, dns.RcodeServerFailure))
+			log.Printf("%s: responded in %d ms", name, (time.Now().UnixMilli() - startTime))
 			return
 		}
 		cached, err := cd.cache.Lookup(req)
 		if err != nil {
+			log.Printf("[BLOCKED] %s", err.Error())
 			w.WriteMsg(handleWithRcode(req, dns.RcodeNameError))
+			log.Printf("%s: responded in %d ms", name, (time.Now().UnixMilli() - startTime))
 			return
 		} else if cached != nil {
 			w.WriteMsg(handleWithUpstreamResp(req, cached))
+			log.Printf("%s: responded in %d ms", name, (time.Now().UnixMilli() - startTime))
 			return
 		} else if cd.adBlocker.BlockIfMatch(name) {
 			w.WriteMsg(handleWithRcode(req, dns.RcodeNameError))
+			log.Printf("%s: responded in %d ms", name, (time.Now().UnixMilli() - startTime))
 			return
 		}
 		req.RecursionDesired = true
@@ -104,6 +112,7 @@ func (cd *cachingDispatcher) handleDNSRequest() func(dns.ResponseWriter, *dns.Ms
 		if err != nil {
 			log.Printf("Connection Failure: " + err.Error() + "\n")
 			w.WriteMsg(handleWithRcode(req, dns.RcodeServerFailure))
+			log.Printf("%s: responded in %d ms", name, (time.Now().UnixMilli() - startTime))
 			return
 		}
 
@@ -111,6 +120,7 @@ func (cd *cachingDispatcher) handleDNSRequest() func(dns.ResponseWriter, *dns.Ms
 			cd.cacheQueue <- resp
 		}
 		w.WriteMsg(handleWithUpstreamResp(req, resp))
+		log.Printf("%s: responded in %d ms", name, (time.Now().UnixMilli() - startTime))
 	}
 }
 

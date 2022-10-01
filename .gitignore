@@ -86,3 +86,5 @@ tags
 
 /bin
 
+/litedns
+*.bak

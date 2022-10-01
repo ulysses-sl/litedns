@@ -1,12 +1,16 @@
 package main
 
 import (
+	"flag"
 	"github.com/miekg/dns"
 	"log"
 	"strconv"
 )
 
 func main() {
+	port := flag.Int("p", 53, "local DNS server port")
+	flag.Parse()
+
 	cc1 := &clientConfig{
 		ns:    "1.1.1.1",
 		port:  853,
@@ -23,9 +27,8 @@ func main() {
 	dns.HandleFunc(".", d.handleDNSRequest())
 
 	// start server
-	port := 53
-	server := &dns.Server{Addr: ":" + strconv.Itoa(port), Net: "udp"}
-	log.Printf("Starting at %d\n", port)
+	server := &dns.Server{Addr: ":" + strconv.Itoa(*port), Net: "udp"}
+	log.Printf("Starting at %d\n", *port)
 	err := server.ListenAndServe()
 	defer server.Shutdown()
 	if err != nil {
