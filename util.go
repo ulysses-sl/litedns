@@ -2,9 +2,9 @@ package main
 
 import (
 	"errors"
+	"github.com/miekg/dns"
 	"strings"
 	"time"
-	"github.com/miekg/dns"
 )
 
 func GetTTLDeadline(ttl uint32) *time.Time {
@@ -65,10 +65,9 @@ func reverse(s string) string {
 }
 
 func parseABPSyntax(line string) (*string, error) {
-	if (strings.HasPrefix(line, "||") && strings.HasSuffix(line, "^")) {
+	if strings.HasPrefix(line, "||") && strings.HasSuffix(line, "^") {
 		cname := dns.CanonicalName(line[2 : len(line)-1])
 		return &cname, nil
 	}
 	return nil, errors.New("Not an ABP syntax")
 }
-

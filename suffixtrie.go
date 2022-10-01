@@ -68,18 +68,27 @@ func (t *trie) Lookup(cname string, recordIdx int) (*dns.Msg, error) {
 			return nil, fmt.Errorf("(partial) %s", cname)
 		}
 		key := TrieKey(cname[i])
+		//log.Printf("working on %s[%d]", cname, i)
 		curr = curr.edges[key].Load()
 		if curr == nil {
+			//log.Printf("%s[%d] not found, exiting", cname, i)
 			return nil, nil
 		}
 	}
 	if curr.isBlocked {
+		//log.Printf("%s is blocked", cname)
 		return nil, fmt.Errorf("(match) %s", cname)
 	}
 	r := curr.dnsRecords[recordIdx].Load()
-	if r == nil || r.HasExpired() {
+	if r == nil {
+		//log.Printf("%s does not exist in cache", cname)
 		return nil, nil
 	}
+	if r.HasExpired() {
+		//log.Printf("%s cache entry expired", cname)
+		return nil, nil
+	}
+	//log.Printf("%s cache entry FOUND", cname)
 	return r.entry, nil
 }
 
@@ -121,11 +130,11 @@ func (t *trie) ForceResp(cname string) {
 	}
 	curr.isBlocked = true
 }
+
 /*
 func (t *trie) Purge() {
 	curr := t
 	<-curr.modifyPriv
-	if 
+	if
 	curr.modifyPriv <- struct{}{}
 }*/
-

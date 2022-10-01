@@ -1,10 +1,10 @@
 package main
 
 import (
+	"github.com/miekg/dns"
 	"log"
 	"strings"
-	"github.com/miekg/dns"
-	"time"
+	//"time"
 )
 
 type Dispatcher interface {
@@ -32,7 +32,7 @@ func NewCachingDispatcher(cc1 *clientConfig, cc2 *clientConfig) *cachingDispatch
 
 	cpool := make(chan DNSClient)
 
-	cacheq := make(chan *dns.Msg, 10)
+	cacheq := make(chan *dns.Msg, 200)
 
 	ab := NewAdBlocker(cache)
 
@@ -52,7 +52,7 @@ func NewCachingDispatcher(cc1 *clientConfig, cc2 *clientConfig) *cachingDispatch
 func (cd *cachingDispatcher) processCacheQueue() {
 	go func() {
 		for {
-			msg := <- cd.cacheQueue
+			msg := <-cd.cacheQueue
 			cd.cache.Insert(msg)
 		}
 	}()
@@ -73,37 +73,45 @@ func (cd *cachingDispatcher) supplyClients(clients []DNSClient) {
 
 func (cd *cachingDispatcher) handleDNSRequest() func(dns.ResponseWriter, *dns.Msg) {
 	return func(w dns.ResponseWriter, req *dns.Msg) {
-		startTime := time.Now().UnixMilli()
+		//startT := time.Now().UnixMilli()
 		name := dns.CanonicalName(req.Question[0].Name)
 		qtypeStr := dns.TypeToString[req.Question[0].Qtype]
 		if strings.Count(name, ".") == 1 {
-			log.Printf(name + " " + qtypeStr + " : Local hostname lookup is forbidden\n")
+			//log.Printf("%s %s : Local hostname lookup is forbidden\n", name, qtypeStr)
 			w.WriteMsg(handleWithRcode(req, dns.RcodeServerFailure))
-			log.Printf("%s: responded in %d ms", name, (time.Now().UnixMilli() - startTime))
+			//endT :=time.Now().UnixMilli()
+			//log.Printf("[DENIED] %4d ms, %-5s %s", endT - startT, qtypeStr, name)
+			log.Printf("[DENIED] %-5s  %s", qtypeStr, name)
 			return
 		}
 		if isLocalIPLookup(name) {
-			log.Printf(name + " " + qtypeStr + " : Local IP lookup is forbidden\n")
+			//log.Printf("%s %s : Local IP lookup is forbidden\n", name, qtypeStr)
 			w.WriteMsg(handleWithRcode(req, dns.RcodeServerFailure))
-			log.Printf("%s: responded in %d ms", name, (time.Now().UnixMilli() - startTime))
+			//endT :=time.Now().UnixMilli()
+			//log.Printf("[DENIED] %4d ms, %-5s %s", endT - startT, qtypeStr, name)
+			log.Printf("[DENIED] %-5s  %s", qtypeStr, name)
 			return
 		}
 		cached, err := cd.cache.Lookup(req)
 		if err != nil {
-			log.Printf("[BLOCKED] %s", err.Error())
 			w.WriteMsg(handleWithRcode(req, dns.RcodeNameError))
-			log.Printf("%s: responded in %d ms", name, (time.Now().UnixMilli() - startTime))
+			//endT :=time.Now().UnixMilli()
+			//log.Printf("[ADBLCK] %4d ms, %-5s %s", endT - startT, qtypeStr, name)
+			log.Printf("[BLOCKD] %-5s  %s", qtypeStr, name)
 			return
 		} else if cached != nil {
 			w.WriteMsg(handleWithUpstreamResp(req, cached))
-			log.Printf("%s: responded in %d ms", name, (time.Now().UnixMilli() - startTime))
+			//endT :=time.Now().UnixMilli()
+			//log.Printf("[LOOKUP] %4d ms, %-5s %s", endT - startT, qtypeStr, name)
 			return
 		} else if cd.adBlocker.BlockIfMatch(name) {
 			w.WriteMsg(handleWithRcode(req, dns.RcodeNameError))
-			log.Printf("%s: responded in %d ms", name, (time.Now().UnixMilli() - startTime))
+			//endT :=time.Now().UnixMilli()
+			//log.Printf("[NEWBLK] %4d ms, %-5s %s", endT - startT, qtypeStr, name)
+			log.Printf("[NEWBLK] %-5s  %s", qtypeStr, name)
 			return
 		}
-		req.RecursionDesired = true
+		//req.RecursionDesired = true
 
 		c := <-cd.clientPool
 
@@ -112,7 +120,8 @@ func (cd *cachingDispatcher) handleDNSRequest() func(dns.ResponseWriter, *dns.Ms
 		if err != nil {
 			log.Printf("Connection Failure: " + err.Error() + "\n")
 			w.WriteMsg(handleWithRcode(req, dns.RcodeServerFailure))
-			log.Printf("%s: responded in %d ms", name, (time.Now().UnixMilli() - startTime))
+			//endT :=time.Now().UnixMilli()
+			//log.Printf("[CONERR] %4d ms, %-5s %s", endT - startT, qtypeStr, name)
 			return
 		}
 
@@ -120,7 +129,8 @@ func (cd *cachingDispatcher) handleDNSRequest() func(dns.ResponseWriter, *dns.Ms
 			cd.cacheQueue <- resp
 		}
 		w.WriteMsg(handleWithUpstreamResp(req, resp))
-		log.Printf("%s: responded in %d ms", name, (time.Now().UnixMilli() - startTime))
+		//endT :=time.Now().UnixMilli()
+		//log.Printf("[MISSED] %4d ms, %-5s %s", endT - startT, qtypeStr, name)
 	}
 }
 

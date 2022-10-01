@@ -3,6 +3,7 @@ package main
 import (
 	"github.com/miekg/dns"
 	"time"
+	//"log"
 	//"sync"
 	//"sync/atomic"
 )
@@ -14,7 +15,7 @@ type DNSCache interface {
 }
 
 type dnsRecord struct {
-	entry *dns.Msg
+	entry  *dns.Msg
 	expiry int64
 }
 
@@ -22,15 +23,20 @@ func NewDNSRecord(r *dns.Msg) *dnsRecord {
 	if r == nil || len(r.Answer) == 0 {
 		return nil
 	}
+	//ttlSeconds := (int64)(r.Answer[0].Header().Ttl)
+	var ttlSeconds int64 = 3600
 	dr := dnsRecord{
-		entry: r,
-		expiry: time.Now().Unix() + (int64)(r.Answer[0].Header().Ttl),
+		entry:  r,
+		expiry: time.Now().Unix() + ttlSeconds,
 	}
 	return &dr
 }
 
 func (dr *dnsRecord) HasExpired() bool {
-	return time.Now().Unix() < dr.expiry
+	nowTime := time.Now().Unix()
+	timeDiff := dr.expiry - nowTime
+	//log.Printf("Current Timestamp %d, Expiry %d, diff %d", nowTime, dr.expiry, timeDiff)
+	return timeDiff < 0
 }
 
 type hostBlockedError struct {

@@ -58,7 +58,7 @@ func (ab *oisdAdBlocker) BlockIfMatch(cname string) bool {
 		} else {
 			domainToBlock := reverse((*ab.blockList)[m])
 			ab.BlockDomain(domainToBlock)
-			log.Printf("Blocking " + cname)
+			//log.Printf("[WRN] Blocking %s", cname)
 			return true
 		}
 	}
@@ -120,4 +120,3 @@ func (ab *oisdAdBlocker) updateList() bool {
 	}
 	return false
 }
-

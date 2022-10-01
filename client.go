@@ -2,11 +2,11 @@ package main
 
 import (
 	"context"
-	"strconv"
-	"net"
-	"net/http"
 	"crypto/tls"
 	"github.com/miekg/dns"
+	"net"
+	"net/http"
+	"strconv"
 )
 
 type DNSClient interface {
@@ -71,5 +71,4 @@ func NewHTTPSClient(resolverProto string, resolverIP string) *http.Client {
 
 	http.DefaultTransport.(*http.Transport).DialContext = dialContext
 	return &http.Client{}
-}	
-
+}
