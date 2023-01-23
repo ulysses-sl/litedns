@@ -8,84 +8,73 @@ import (
 )
 
 type trieCache struct {
-	validQueryTypeMask uint64
-	queryIdx           [34]int
-	trieRoot           *trie
+	queryIdx []int
+	trieRoot *trie
 }
 
-func NewDNSTrieCache() DNSCache {
-	return NewTrieCache()
+func NewDNSTrieCache(queryTypes []uint16) DNSCache {
+	return NewTrieCache(queryTypes)
 }
 
-func NewTrieCache() DNSCache {
-	validTypes := [9]uint16{
-		dns.TypeA, dns.TypeNS, dns.TypeCNAME,
-		dns.TypeSOA, dns.TypePTR, dns.TypeMX,
-		dns.TypeTXT, dns.TypeAAAA, dns.TypeSRV,
+func NewTrieCache(queryTypes []uint16) DNSCache {
+	var queryIdx []int
+
+	maxQueryType := 0
+	for _, qt := range queryTypes {
+		if maxQueryType < int(qt) {
+			maxQueryType = int(qt)
+		}
 	}
-	qIdx := [34]int{}
-	for i := range qIdx {
-		qIdx[i] = -1
+	for i := 0; i <= maxQueryType; i++ {
+		queryIdx = append(queryIdx, -1)
 	}
-	var vqt uint64 = 0
-	for i, t := range validTypes {
-		vqt |= 1 << t
-		qIdx[t] = i
+	for i, rrType := range queryTypes {
+		queryIdx[rrType] = i
 	}
 	tc := trieCache{
-		validQueryTypeMask: vqt,
-		queryIdx:           qIdx,
-		trieRoot:           NewTrieRoot(),
+		queryIdx: queryIdx,
+		trieRoot: NewTrieRoot(len(queryTypes)),
 	}
 	return &tc
 }
 
-func (tc *trieCache) Lookup(query *dns.Msg) (*dns.Msg, error) {
+func (tc *trieCache) IsValidQueryType(query *dns.Msg) bool {
 	rrType := query.Question[0].Qtype
-	if tc.validQueryTypeMask&(1<<rrType) == 0 {
+	return int(rrType) < len(tc.queryIdx) && tc.queryIdx[rrType] >= 0
+}
+
+func (tc *trieCache) Lookup(query *dns.Msg) (*dns.Msg, error) {
+	if !(tc.IsValidQueryType(query)) {
 		return nil, nil
 	}
+	rrType := query.Question[0].Qtype
 	question := query.Question[0]
 	cname := dns.CanonicalName(question.Name)
 	recordIdx := tc.queryIdx[rrType]
 
-	//tStart := time.Now().UnixMilli()
 	retval, err := tc.trieRoot.Lookup(cname, recordIdx)
-	//tEnd := time.Now().UnixMilli()
-	//log.Printf("[INF] %3d ms LOOKUP, %s", tEnd - tStart, cname)
 	return retval, err
 }
 
 func (tc *trieCache) Insert(record *dns.Msg) bool {
 	if record == nil || len(record.Answer) == 0 {
-		//log.Printf("[ERR] Invalid record")
 		return false
 	}
-	rrType := record.Question[0].Qtype
-	if tc.validQueryTypeMask&(1<<rrType) == 0 {
-		//log.Printf("[ERR] %s caching is not supported", dns.TypeToString[rrType])
+	if !(tc.IsValidQueryType(record)) {
 		return false
 	}
 	if record.Rcode != dns.RcodeSuccess {
-		//log.Printf("[ERR] Caching failure is not supported")
 		return false
 	}
+	rrType := record.Question[0].Qtype
 	question := record.Question[0]
 	cname := dns.CanonicalName(question.Name)
 	recordIdx := tc.queryIdx[rrType]
 
-	//tStart := time.Now().UnixMilli()
 	retval := tc.trieRoot.Insert(record, cname, recordIdx)
-	//tEnd := time.Now().UnixMilli()
-	//log.Printf("[INF] %3d ms INSERT, %s", tEnd - tStart, cname)
 	return retval
 }
 
 func (tc *trieCache) ForceResp(cname string) {
-	//tStart := time.Now().UnixMilli()
 	tc.trieRoot.ForceResp(cname)
-	//tEnd := time.Now().UnixMilli()
-	//log.Printf("[INF] %3d ms ADBLCK, %s", tEnd - tStart, cname)
 }
-
-//func (tc *trieCache) Purge(node *trie, record)

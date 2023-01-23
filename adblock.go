@@ -1,8 +1,9 @@
 package main
 
 import (
-	"io/ioutil"
+	"io"
 	"log"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -14,7 +15,7 @@ type AdBlocker interface {
 }
 
 type oisdAdBlocker struct {
-	resolverIP    string
+	resolverAddrs []string
 	resolverProto string
 	oisdListUrl   string
 	blockList     *[]string
@@ -25,8 +26,18 @@ type oisdAdBlocker struct {
 func NewAdBlocker(cache DNSCache) AdBlocker {
 	bq := make(chan string, 1)
 
+	resolvers := []string{
+		"1.1.1.1:853",
+		"1.0.0.1:853",
+		"[2606:4700:4700::1111]:853",
+		"[2606:4700:4700::1001]:853",
+		"8.8.8.8:853",
+		"8.8.4.4:853",
+		"[2001:4860:4860::8888]:853",
+		"[2001:4860:4860::8844]:853",
+	}
 	ab := oisdAdBlocker{
-		resolverIP:    "1.1.1.1:853",
+		resolverAddrs: resolvers,
 		resolverProto: "tcp",
 		oisdListUrl:   "https://abp.oisd.nl/",
 		blockList:     nil,
@@ -89,24 +100,39 @@ func (ab *oisdAdBlocker) queueListUpdate() {
 }
 
 func (ab *oisdAdBlocker) updateList() bool {
-	client := NewHTTPSClient(ab.resolverProto, ab.resolverIP)
-	resp, err := client.Get(ab.oisdListUrl)
+	var client *http.Client
+	var resp *http.Response
+	var cname *string
+	var body []byte
+	var err error
+
+	for _, resolverIP := range ab.resolverAddrs {
+		client = NewHTTPSClient(ab.resolverProto, resolverIP)
+		resp, err = client.Get(ab.oisdListUrl)
+		if err == nil {
+			break
+		}
+		client.CloseIdleConnections()
+	}
+
 	if err != nil {
 		return false
 	}
+
+	defer client.CloseIdleConnections()
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return false
 	}
 
 	lines := strings.Split(string(body), "\n")
 
-	blockList := []string{}
+	var blockList []string
 
 	for i := range lines {
-		cname, err := parseABPSyntax(lines[i])
+		cname, err = parseABPSyntax(lines[i])
 		if err == nil {
 			blockList = append(blockList, reverse(*cname))
 		}

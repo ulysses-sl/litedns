@@ -11,12 +11,15 @@ import (
 )
 
 func TrieKey(char byte) byte {
-	return ((char & 64) >> 1) ^ (char & 63)
+	char = char - 45
+	key := (char % 31) | ((char & 64) >> 1)
+	//key := (((char ^ (char >> 1)) & 32) >> 1) | (char & 31)
+	return key
 }
 
 type trie struct {
 	parent     *trie
-	dnsRecords [9]atomic.Pointer[dnsRecord]
+	dnsRecords []atomic.Pointer[dnsRecord]
 	edges      [64]atomic.Pointer[trie]
 	//recCount   atomic.Int32
 	//edgeCount  atomic.Int32
@@ -26,22 +29,22 @@ type trie struct {
 	modifyPriv chan struct{}
 }
 
-func NewTrieRoot() *trie {
-	return NewTrieNode(nil, 0)
+func NewTrieRoot(recordTypes int) *trie {
+	return NewTrieNode(nil, recordTypes, 0)
 }
 
-func NewTrieNode(parent *trie, char byte) *trie {
+func NewTrieNode(parent *trie, recordTypes int, char byte) *trie {
 	pDepth := 0
 	if parent != nil {
 		pDepth = parent.depth
 	}
 	c := &(trie{
 		parent:     parent,
-		dnsRecords: [9]atomic.Pointer[dnsRecord]{},
+		dnsRecords: make([]atomic.Pointer[dnsRecord], recordTypes),
 		edges:      [64]atomic.Pointer[trie]{},
 		//recCount:   atomic.Int32{},
 		//edgeCount:  atomic.Int32{},
-		depth:      (pDepth + 1),
+		depth:      pDepth + 1,
 		char:       char,
 		isBlocked:  false,
 		modifyPriv: make(chan struct{}, 1),
@@ -50,15 +53,26 @@ func NewTrieNode(parent *trie, char byte) *trie {
 	//recCount.Store(0)
 	//edgeCount.Store(0)
 
-	for i := 0; i < len(c.dnsRecords); i++ {
-		c.dnsRecords[i] = atomic.Pointer[dnsRecord]{}
-	}
+	/*
+		for i := 0; i < len(c.dnsRecords); i++ {
+			c.dnsRecords[i] = atomic.Pointer[dnsRecord]{}
+		}
 
-	for j := 0; j < len(c.edges); j++ {
-		c.edges[j] = atomic.Pointer[trie]{}
-	}
+		for j := 0; j < len(c.edges); j++ {
+			c.edges[j] = atomic.Pointer[trie]{}
+		}
+	*/
+
 	c.modifyPriv <- struct{}{}
 	return c
+}
+
+func (t *trie) Lock() {
+	<-t.modifyPriv
+}
+
+func (t *trie) Unlock() {
+	t.modifyPriv <- struct{}{}
 }
 
 func (t *trie) Lookup(cname string, recordIdx int) (*dns.Msg, error) {
@@ -68,28 +82,22 @@ func (t *trie) Lookup(cname string, recordIdx int) (*dns.Msg, error) {
 			return nil, fmt.Errorf("(partial) %s", cname)
 		}
 		key := TrieKey(cname[i])
-		//log.Printf("working on %s[%d]", cname, i)
 		curr = curr.edges[key].Load()
 		if curr == nil {
-			//log.Printf("%s[%d] not found, exiting", cname, i)
 			return nil, nil
 		}
 	}
 	if curr.isBlocked {
-		//log.Printf("%s is blocked", cname)
 		return nil, fmt.Errorf("(match) %s", cname)
 	}
-	r := curr.dnsRecords[recordIdx].Load()
-	if r == nil {
-		//log.Printf("%s does not exist in cache", cname)
+	var record *dnsRecord = curr.dnsRecords[recordIdx].Load()
+	if record == nil {
 		return nil, nil
 	}
-	if r.HasExpired() {
-		//log.Printf("%s cache entry expired", cname)
+	if record.HasExpired() {
 		return nil, nil
 	}
-	//log.Printf("%s cache entry FOUND", cname)
-	return r.entry, nil
+	return record.entry, nil
 }
 
 func (t *trie) Insert(record *dns.Msg, cname string, recIdx int) bool {
@@ -98,15 +106,7 @@ func (t *trie) Insert(record *dns.Msg, cname string, recIdx int) bool {
 		if cname[i] == '.' && curr.isBlocked {
 			return false
 		}
-		key := TrieKey(cname[i])
-		<-curr.modifyPriv
-		child := curr.edges[key].Load()
-		if child == nil {
-			child = NewTrieNode(curr, cname[i])
-			curr.edges[key].Store(child)
-		}
-		curr.modifyPriv <- struct{}{}
-		curr = child
+		curr = curr.AddChild(cname[i])
 	}
 	if curr.isBlocked {
 		return false
@@ -118,23 +118,19 @@ func (t *trie) Insert(record *dns.Msg, cname string, recIdx int) bool {
 func (t *trie) ForceResp(cname string) {
 	curr := t
 	for i := len(cname) - 1; i >= 0; i-- {
-		key := TrieKey(cname[i])
-		<-curr.modifyPriv
-		child := curr.edges[key].Load()
-		if child == nil {
-			child = NewTrieNode(curr, cname[i])
-			curr.edges[key].Store(child)
-		}
-		curr.modifyPriv <- struct{}{}
-		curr = child
+		curr = curr.AddChild(cname[i])
 	}
 	curr.isBlocked = true
 }
 
-/*
-func (t *trie) Purge() {
-	curr := t
-	<-curr.modifyPriv
-	if
-	curr.modifyPriv <- struct{}{}
-}*/
+func (t *trie) AddChild(char byte) *trie {
+	key := TrieKey(char)
+	t.Lock()
+	child := t.edges[key].Load()
+	if child == nil {
+		child = NewTrieNode(t, len(t.dnsRecords), char)
+		t.edges[key].Store(child)
+	}
+	t.Unlock()
+	return child
+}
