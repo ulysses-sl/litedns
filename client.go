@@ -14,9 +14,11 @@ type DNSClient interface {
 }
 
 type tlsClient struct {
-	qns    string
-	tlsCfg *tls.Config
 	client *dns.Client
+	conn   *dns.Conn
+	tlsCfg *tls.Config
+	qns    string
+	renew  chan struct{}
 }
 
 type clientConfig struct {
@@ -30,26 +32,71 @@ func NewDNSClient(cc *clientConfig) DNSClient {
 }
 
 func NewTLSClient(cc *clientConfig) *tlsClient {
-	tlsCfg := tls.Config{}
+	tlsCfg := &(tls.Config{})
 	dc := new(dns.Client)
 	dc.Net = cc.proto
 	dc.SingleInflight = true
 	tc := tlsClient{
 		client: dc,
+		conn:   nil,
+		tlsCfg: tlsCfg,
 		qns:    cc.ns + ":" + strconv.Itoa(cc.port),
-		tlsCfg: &tlsCfg,
+		renew:  make(chan struct{}, 1),
 	}
+	tc.renew <- struct{}{}
 	return &tc
 }
 
-func (tc tlsClient) Exchange(req *dns.Msg) (*dns.Msg, error) {
+func (tc *tlsClient) CreateConnection() error {
 	conn, err := dns.DialWithTLS("tcp-tls", tc.qns, tc.tlsCfg)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	resp, _, err := tc.client.ExchangeWithConn(req, conn)
+	tc.conn = conn
+	return nil
+}
+
+func (tc *tlsClient) Lock() {
+	<-tc.renew
+}
+
+func (tc *tlsClient) Unlock() {
+	tc.renew <- struct{}{}
+}
+
+func (tc *tlsClient) Exchange(req *dns.Msg) (*dns.Msg, error) {
+	var err error
+	var resp *dns.Msg
+	if tc.conn == nil {
+		tc.Lock()
+		// prevent race condition
+		if tc.conn == nil {
+			err = tc.CreateConnection()
+			if err != nil {
+				tc.Unlock()
+				return nil, err
+			}
+		}
+		tc.Unlock()
+	}
+	conn := tc.conn
+	resp, _, err = tc.client.ExchangeWithConn(req, conn)
 	if err != nil {
-		return nil, err
+		tc.Lock()
+		// prevent race condition
+		if tc.conn == conn {
+			tc.conn.Close()
+			err = tc.CreateConnection()
+			if err != nil {
+				tc.Unlock()
+				return nil, err
+			}
+		}
+		tc.Unlock()
+		resp, _, err = tc.client.ExchangeWithConn(req, tc.conn)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return resp, nil
 }

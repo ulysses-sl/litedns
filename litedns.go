@@ -23,7 +23,24 @@ func main() {
 		proto: "tcp-tls",
 	}
 
-	d := NewDispatcher(cc1, cc2)
+	clientConfigs := []*clientConfig{
+		cc1,
+		cc2,
+	}
+
+	queryTypes := []uint16{
+		dns.TypeA,
+		//dns.TypeNS,
+		//dns.TypeCNAME,
+		//dns.TypeSOA,
+		dns.TypePTR,
+		//dns.TypeMX,
+		//dns.TypeTXT,
+		dns.TypeAAAA,
+		//dns.TypeSRV,
+	}
+
+	d := NewDispatcher(clientConfigs, queryTypes)
 	dns.HandleFunc(".", d.handleDNSRequest())
 
 	// start server
