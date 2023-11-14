@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/miekg/dns"
 	"io"
 	"net"
 	"os"
@@ -14,11 +15,13 @@ const MaxConfigFileSize = 4096
 const DefaultCacheTTL = 600
 const DefaultMinTTL = 600
 const DefaultMaxTTL = 86400
+const DefaultNegativeCacheTTL = 300
+const DefaultCachePurgeInterval = 600
+const DefaultCacheCompactInterval = 1800
 const PortMin = 1
 const PortMax = 65535
 const DefaultListenPort = 53
 
-/*
 type RecordType struct {
 	Name  string
 	Value uint16
@@ -48,7 +51,6 @@ var RecordStrToType = map[string]RecordType{
 	TypeTXT:   {Name: TypeTXT, Value: dns.TypeTXT},
 }
 
-
 func (rt *RecordType) UnmarshalJSON(b []byte) error {
 	var rtStr string
 	err := json.Unmarshal(b, &rtStr)
@@ -62,25 +64,31 @@ func (rt *RecordType) UnmarshalJSON(b []byte) error {
 	}
 	return errors.New("invalid DNS record type: " + rtStr)
 }
-*/
 
 type LiteDNSConfig struct {
-	UpstreamServers  []*ServerConfig  `json:"upstreamServer"`
-	LocalNameServers []*ServerConfig  `json:"localNameServer"`
+	UpstreamServers  []*ServerConfig  `json:"upstreamServers"`
+	LocalNameServers []*ServerConfig  `json:"LocalNameServers"`
 	AdBlocker        *AdBlockerConfig `json:"adBlocker"`
-	//CachedRecordTypes []*RecordType    `json:"cachedRecordTypes"`
-	CacheTTL int64 `json:"cacheTTL"`
-	//MinTTL            uint32           `json:"minTTL"`
-	//MaxTTL            uint32           `json:"maxTTL"`
-	ListenIP    net.IP `json:"listenIP"`
-	ListenPort  uint16 `json:"listenPort"`
-	ListenProto string `json:"listenProtocol"`
+	CacheConfig      *DNSCacheConfig  `json:"cacheConfig"`
+	ListenerConfig   *ServerConfig    `json:"listenerConfig"`
 }
 
 type ServerConfig struct {
-	IP    net.IP
-	Port  uint16
-	Proto string
+	IP    net.IP `json:"ip"`
+	Port  uint16 `json:"port"`
+	Proto string `json:"proto"`
+}
+
+type AdBlockerConfig struct {
+	ABPFilterURL string `json:"abpFilterURL"`
+	SinkIP4      net.IP `json:"sinkIP4"`
+	SinkIP6      net.IP `json:"sinkIP6"`
+}
+
+type DNSCacheConfig struct {
+	CacheSize   int           `json:"cacheSize"`
+	CacheTTL    int64         `json:"cacheTTL"`
+	RecordTypes []*RecordType `json:"recordTypes"`
 }
 
 func (sc *ServerConfig) String() string {
@@ -89,12 +97,6 @@ func (sc *ServerConfig) String() string {
 	} else {
 		return fmt.Sprintf("[%s]:%d", sc.IP.String(), sc.Port)
 	}
-}
-
-type AdBlockerConfig struct {
-	ABPFilterURL string `json:"abpFilterURL"`
-	SinkIP4      net.IP `json:"sinkIP4"`
-	SinkIP6      net.IP `json:"sinkIP6"`
 }
 
 func LoadConfig(filename string) (_ *LiteDNSConfig, err error) {
@@ -135,82 +137,41 @@ func LoadConfig(filename string) (_ *LiteDNSConfig, err error) {
 }
 
 func VerifyConfig(config *LiteDNSConfig) error {
-	/*
-		if config.MinTTL == 0 {
-			config.MinTTL = DefaultMinTTL
-		}
-		if config.MaxTTL == 0 {
-			config.MaxTTL = DefaultMaxTTL
-		}
-	*/
-	if config.CacheTTL <= 0 {
-		config.CacheTTL = DefaultCacheTTL
+	if config.CacheConfig.CacheTTL <= 0 {
+		config.CacheConfig.CacheTTL = DefaultCacheTTL
 	}
-	if config.CacheTTL > DefaultMaxTTL {
-		config.CacheTTL = DefaultMaxTTL
+	if config.CacheConfig.CacheTTL > DefaultMaxTTL {
+		config.CacheConfig.CacheTTL = DefaultMaxTTL
 	}
-	if config.CacheTTL < DefaultMinTTL {
-		config.CacheTTL = DefaultMinTTL
+	if config.CacheConfig.CacheTTL < DefaultMinTTL {
+		config.CacheConfig.CacheTTL = DefaultMinTTL
 	}
-
-	/*
-		if config.MinTTL > DefaultMaxTTL {
-			return fmt.Errorf("min TTL should be between 0 and %d: %d",
-				DefaultMaxTTL,
-				config.MinTTL)
-		}
-		if config.MaxTTL > DefaultMaxTTL {
-			return fmt.Errorf("max TTL should be between 0 and %d: %d",
-				DefaultMaxTTL,
-				config.MaxTTL)
-		}
-		if config.MaxTTL < config.MinTTL {
-			return fmt.Errorf("max TTL %d should be greater or equal to min TTL %d",
-				config.MaxTTL,
-				config.MinTTL)
-		}
-	*/
-
-	/*
-		if len(config.CachedRecordTypes) == 0 {
-			return fmt.Errorf("no DNS record type was specified for caching")
-		}
-		seenRecTypes := make(map[uint16]struct{}, len(RecordStrToType))
-		for _, rt := range config.CachedRecordTypes {
-			if _, seen := seenRecTypes[rt.Value]; seen {
-				return fmt.Errorf(
-					"duplicate record types was specified to be cached: %s",
-					rt.Name)
-			}
-			seenRecTypes[rt.Value] = struct{}{}
-		}
-	*/
-
+	if len(config.CacheConfig.RecordTypes) == 0 {
+		return fmt.Errorf("no DNS record type was specified for caching")
+	}
+	config.CacheConfig.RecordTypes = Unique(config.CacheConfig.RecordTypes,
+		func(r *RecordType) uint16 { return r.Value })
 	if len(config.UpstreamServers) == 0 {
 		return fmt.Errorf("no upstream DNS server was specified")
 	}
-	seenUpstreamSrv := make(map[string]struct{}, len(config.UpstreamServers))
-	for _, srv := range config.UpstreamServers {
-		ipStr := srv.IP.String()
-		if _, seen := seenUpstreamSrv[ipStr]; seen {
-			return fmt.Errorf(
-				"duplicate upstream DNS server: %s", ipStr)
+	config.UpstreamServers = Unique(config.UpstreamServers,
+		func(s *ServerConfig) string { return s.IP.String() })
+	for _, s := range config.UpstreamServers {
+		if s.Port == 0 {
+			return fmt.Errorf("invalid port 0 for the upstream server %s",
+				s.String())
 		}
-		seenUpstreamSrv[ipStr] = struct{}{}
 	}
-
-	seenLocalSrv := make(map[string]struct{}, len(config.LocalNameServers))
-	for _, srv := range config.LocalNameServers {
-		ipStr := srv.IP.String()
-		if _, seen := seenLocalSrv[ipStr]; seen {
-			return fmt.Errorf(
-				"duplicate local network DNS server: %s", ipStr)
+	config.LocalNameServers = Unique(config.LocalNameServers,
+		func(s *ServerConfig) string { return s.IP.String() })
+	for _, s := range config.LocalNameServers {
+		if s.Port == 0 {
+			return fmt.Errorf("invalid port 0 for the local area server %s",
+				s.String())
 		}
-		seenLocalSrv[ipStr] = struct{}{}
 	}
-
-	if config.ListenPort == 0 {
-		config.ListenPort = DefaultListenPort
+	if config.ListenerConfig.Port == 0 {
+		return fmt.Errorf("invalid port 0 for the local server")
 	}
 	return nil
 }

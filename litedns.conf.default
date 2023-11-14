@@ -1,0 +1,40 @@
+{
+  "upstreamServers": [
+    {
+      "ip": "1.1.1.1",
+      "port": 853,
+      "proto": "tcp-tls"
+    },
+    {
+      "ip": "1.0.0.1",
+      "port": 853,
+      "proto": "tcp-tls"
+    }
+  ],
+  "localNameServers": [
+    {
+      "ip": "192.168.0.1",
+      "port": 53,
+      "proto": "default"
+    },
+  ],
+  "listenerConfig": {
+    "ip": "::",
+    "port": 53,
+    "proto": "default"
+  },
+  "adBlocker": {
+    "blockListUrl": "https://big.oisd.nl/",
+    "sinkIP4": "0.0.0.0",
+    "sinkIP6": "::"
+  },
+  "cacheConfig": {
+    "cacheSize": 900,
+    "cacheTTL": 900,
+    "recordTypes": [
+      "A",
+      "AAAA",
+      "CNAME"
+    ]
+  },
+}

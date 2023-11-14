@@ -2,56 +2,88 @@ package main
 
 import (
 	"github.com/miekg/dns"
-	"litedns/client"
-	"litedns/handler"
 	"log"
-	"strconv"
+	"net"
+	"time"
 )
 
 var GlobalConfig *LiteDNSConfig
+var OfficialTLDs map[string]struct{}
 
 func Run() {
 	if cfg, err := LoadConfig("litedns.conf"); err != nil {
-		log.Fatalf("Unable to load config: %s\n ", err.Error())
+		log.Fatalf("Unable to load config: %s\n", err.Error())
 	} else {
 		GlobalConfig = cfg
 	}
 
-	cache := NewDNSCache(GlobalConfig.CachedRecordTypes)
-
-	tCache := cache.NewTieredCache(cfg.MinTTL, cfg.MaxTTL)
-	dummyHdlr := NewDummyHandler(cfg.AdBlocker.SinkIP4, cfg.AdBlocker.SinkIP6)
-	uClients := NewDNSClientPool(cfg.UpstreamServers)
-
-	selfServer := &ServerConfig{
-		IP:    cfg.ListenIP,
-		Port:  cfg.ListenPort,
-		Proto: cfg.ListenProto,
+	if tlds, err := LatestTLDs(GlobalConfig.UpstreamServers); err != nil {
+		log.Fatalf("Unable to load IANA TLD list: %s\n", err.Error())
+	} else {
+		OfficialTLDs = tlds
 	}
-	ab := NewAdBlocker(cfg.UpstreamServers, selfServer, cfg.AdBlocker.ABPFilterURL)
-	uHandler := handler.NewCachingHandler(uClients, tCache, ab, dummyHdlr)
 
-	lClients := client.NewDNSClientPool(cfg.LocalNameServers)
-	lHandler := handler.NewBaseHandler(lClients)
-
-	dHandler := handler.NewDummyHandler(cfg.AdBlocker.SinkIP4, cfg.AdBlocker.SinkIP6)
-
-	mux := handler.newMuxHandler(uHandler, lHandler, dHandler)
-
-	dns.Handle(".", mux)
-
-	// start server
-	server := &dns.Server{Addr: ":" + strconv.Itoa(int(cfg.ListenPort)), Net: "udp"}
-	log.Printf("Starting at %d\n", int(cfg.ListenPort))
-	err = server.ListenAndServe()
-	defer func(server *dns.Server) {
-		sderr := server.Shutdown()
-		if sderr != nil {
-			log.Fatalf("Error while shutting down the server: %s\n ",
-				err.Error())
+	go func() {
+		tldUpdateInterval := 86400 * time.Second
+		tldUpdateT := time.NewTimer(tldUpdateInterval)
+		for {
+			<-tldUpdateT.C
+			tlds, err := LatestTLDs(GlobalConfig.UpstreamServers)
+			if err != nil {
+				log.Printf("Unable to load IANA TLD list: %s\n",
+					err.Error())
+			} else {
+				OfficialTLDs = tlds
+			}
+			tldUpdateT.Reset(tldUpdateInterval)
 		}
-	}(server)
-	if err != nil {
-		log.Fatalf("Failed to start server: %s\n ", err.Error())
+	}()
+
+	cache := NewDNSCache(GlobalConfig.CacheConfig)
+	adb := NewAdBlockerHTTP(GlobalConfig.UpstreamServers,
+		GlobalConfig.AdBlocker.ABPFilterURL)
+	uPool := NewDNSClientPool(GlobalConfig.UpstreamServers)
+	lPool := NewDNSClientPool(GlobalConfig.LocalNameServers)
+
+	handler := NewDNSHandler(cache, adb, uPool, lPool)
+
+	dns.Handle(".", handler)
+
+	listenAddr := GlobalConfig.ListenerConfig.IP
+	listenPort := GlobalConfig.ListenerConfig.Port
+
+	udpAddr := net.TCPAddr{IP: listenAddr, Port: int(listenPort)}
+	tcpAddr := net.TCPAddr{IP: listenAddr, Port: int(listenPort)}
+	// start server
+	udpServer := &dns.Server{Addr: udpAddr.String(), Net: UDPProto}
+	log.Printf("Starting UDP server at %v\n", udpAddr.String())
+	tcpServer := &dns.Server{Addr: tcpAddr.String(), Net: TCPProto}
+	log.Printf("Starting TCP server at %v\n", tcpAddr.String())
+	udperr := udpServer.ListenAndServe()
+	tcperr := tcpServer.ListenAndServe()
+	defer func(udpSrv, tcpSrv *dns.Server) {
+		sderr1 := udpSrv.Shutdown()
+		sderr2 := tcpSrv.Shutdown()
+		if sderr1 != nil {
+			if sderr2 != nil {
+				log.Printf("Error while shutting down the TCP server: %s\n ",
+					sderr2.Error())
+			}
+			log.Fatalf("Error while shutting down the UDP server: %s\n",
+				sderr1.Error())
+		}
+		if sderr2 != nil {
+			log.Fatalf("Error while shutting down the TCP server: %s\n",
+				sderr1.Error())
+		}
+	}(udpServer, tcpServer)
+	if udperr != nil {
+		if tcperr != nil {
+			log.Printf("Failed to start TCP server: %s\n", tcperr.Error())
+		}
+		log.Fatalf("Failed to start UDP server: %s\n", udperr.Error())
+	}
+	if tcperr != nil {
+		log.Fatalf("Failed to start TCP server: %s\n", tcperr.Error())
 	}
 }

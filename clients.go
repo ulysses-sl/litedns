@@ -3,36 +3,64 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"errors"
+	"fmt"
 	"github.com/miekg/dns"
+	"io"
 	"log"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 )
 
 const (
-	UDPProto = "udp"
-	TCPProto = "tcp"
-	TLSProto = "tcp-tls"
+	DefaultProto = "default"
+	UDPProto     = "udp"
+	TCPProto     = "tcp"
+	TLSProto     = "tcp-tls"
 )
 const TCPTimeoutMillis = 1000
 
-// DNSClientPool represents the pool of clients, each querying a different
-// upstream DNS server. Implementation-wise, the clients are currently
-// fetched in a round-robin fashion.
+type DNSClient interface {
+	Exchange(*dns.Msg) (*dns.Msg, error)
+}
+
+type UDPClient struct {
+	client     *dns.Client
+	serverAddr string
+}
+
+type TCPClient struct {
+	sync.Mutex
+	client     *dns.Client
+	conn       *dns.Conn
+	tlsCfg     *tls.Config
+	serverAddr string
+}
+
+type DefaultClient struct {
+	udpClient DNSClient
+	tcpClient DNSClient
+}
+
+// DNSClientPool represents a pool of clients, each querying a different
+// upstream DNS server.
 type DNSClientPool struct {
 	clients []DNSClient
 	C       <-chan DNSClient
 }
 
-// NewDNSClientPool
+// NewDNSClientPool creates a pool of clients
 func NewDNSClientPool(servers []*ServerConfig) *DNSClientPool {
 	pool := make(chan DNSClient, 0)
 	cp := &DNSClientPool{
-		clients: make([]DNSClient, len(servers)),
-		C:       pool,
+		C: pool,
 	}
+	if len(servers) == 0 {
+		close(pool)
+		return cp
+	}
+	cp.clients = make([]DNSClient, len(servers))
 	for i := 0; i < len(servers); i++ {
 		cp.clients[i] = NewDNSClient(servers[i])
 	}
@@ -49,13 +77,14 @@ func NewDNSClientPool(servers []*ServerConfig) *DNSClientPool {
 	return cp
 }
 
-type DNSClient interface {
-	Exchange(*dns.Msg) (*dns.Msg, error)
-}
-
 func NewDNSClient(server *ServerConfig) DNSClient {
+	if server == nil {
+		return (*DefaultClient)(nil)
+	}
 	var rv DNSClient
 	switch server.Proto {
+	case DefaultProto:
+		rv = NewDefaultClient(server.String())
 	case UDPProto:
 		rv = NewUDPClient(server.String())
 	case TCPProto:
@@ -68,9 +97,13 @@ func NewDNSClient(server *ServerConfig) DNSClient {
 	return rv
 }
 
-type UDPClient struct {
-	client     *dns.Client
-	serverAddr string
+func NewDefaultClient(serverAddr string) DNSClient {
+	uc := NewUDPClient(serverAddr)
+	tc := NewTCPClient(serverAddr, false)
+	return &DefaultClient{
+		udpClient: uc,
+		tcpClient: tc,
+	}
 }
 
 func NewUDPClient(serverAddr string) DNSClient {
@@ -80,23 +113,9 @@ func NewUDPClient(serverAddr string) DNSClient {
 	}
 }
 
-func (c *UDPClient) Exchange(msg *dns.Msg) (*dns.Msg, error) {
-	resp, _, err := c.client.Exchange(msg, c.serverAddr)
-	return resp, err
-}
-
-type TCPClient struct {
-	client     *dns.Client
-	conn       *dns.Conn
-	tlsCfg     *tls.Config
-	connLock   chan struct{}
-	serverAddr string
-}
-
 func NewTCPClient(serverAddr string, useTLS bool) DNSClient {
 	dc := new(dns.Client)
 	dc.Net = TCPProto
-	dc.SingleInflight = true
 	var tlsCfg *tls.Config
 	if useTLS {
 		tlsCfg = &(tls.Config{})
@@ -105,92 +124,92 @@ func NewTCPClient(serverAddr string, useTLS bool) DNSClient {
 		client:     dc,
 		conn:       nil,
 		tlsCfg:     tlsCfg,
-		connLock:   make(chan struct{}, 1),
 		serverAddr: serverAddr,
 	}
-	tc.connLock <- struct{}{}
 	return &tc
 }
 
-func (tc *TCPClient) Lock() {
-	<-tc.connLock
-}
-
-func (tc *TCPClient) Unlock() {
-	tc.connLock <- struct{}{}
-}
-
-func (tc *TCPClient) CreateConn() error {
-	if tc.conn != nil {
-		return errors.New("connection already exists")
+func (c *DefaultClient) Exchange(msg *dns.Msg) (*dns.Msg, error) {
+	if c == nil {
+		return nil, fmt.Errorf(
+			"attempted to use uninitialized DNS client")
 	}
-	var conn *dns.Conn
-	var err error
-	if tc.tlsCfg != nil {
-		conn, err = dns.DialTimeoutWithTLS(TLSProto, tc.serverAddr,
-			tc.tlsCfg, TCPTimeoutMillis*time.Millisecond)
-	} else {
-		conn, err = dns.DialTimeout(TCPProto, tc.serverAddr,
-			TCPTimeoutMillis*time.Millisecond)
-	}
+	resp, err := c.udpClient.Exchange(msg)
 	if err != nil {
-		return err
-	}
-	tc.conn = conn
-	return nil
-}
-
-func (tc *TCPClient) GetConn() (*dns.Conn, error) {
-	tc.Lock()
-	defer tc.Unlock()
-	if tc.conn != nil {
-		return tc.conn, nil
-	}
-	// prevent race condition
-	if tc.conn != nil {
-		return tc.conn, nil
-	}
-	if err := tc.CreateConn(); err != nil {
 		return nil, err
 	}
-	return tc.conn, nil
+	if resp.Truncated {
+		return c.tcpClient.Exchange(msg)
+	}
+	return resp, nil
+}
+
+func (c *UDPClient) Exchange(msg *dns.Msg) (*dns.Msg, error) {
+	if c == nil {
+		return nil, fmt.Errorf(
+			"attempted to use uninitialized DNS client")
+	}
+	resp, _, err := c.client.Exchange(msg, c.serverAddr)
+	return resp, err
 }
 
 func (tc *TCPClient) Exchange(req *dns.Msg) (*dns.Msg, error) {
-	var err error
+	if tc == nil {
+		return nil, fmt.Errorf(
+			"attempted to use uninitialized DNS client")
+	}
 	var resp *dns.Msg
-	conn, err := tc.GetConn()
-	if err != nil {
-		log.Panicf("cannot create TCP connection to %s: %s",
-			tc.serverAddr, err.Error())
-	}
-	resp, _, err = tc.client.ExchangeWithConn(req, conn)
-	if err == nil {
-		return resp, nil
-	}
-	tc.Lock()
-	// prevent race condition
-	if tc.conn != conn {
-		tc.Unlock() /* Race condition: already renewed. */
-	} else {
-		defer tc.Unlock() /* Defer until the successful exchange */
-		err = tc.conn.Close()
-		if err != nil {
-			log.Panicf("cannot close TCP connection to %s: %s",
-				tc.serverAddr, err.Error())
-		}
-		tc.conn = nil
-		err = tc.CreateConn()
-		if err != nil {
-			log.Panicf("cannot renew TCP connection to %s: %s",
-				tc.serverAddr, err.Error())
-		}
-	}
-	resp, _, err = tc.client.ExchangeWithConn(req, tc.conn)
+	conn, err := tc.GetOrCreateConn()
 	if err != nil {
 		return nil, err
 	}
-	return resp, nil
+	resp, _, err = tc.client.ExchangeWithConn(req, conn)
+	return resp, err
+}
+
+func (tc *TCPClient) GetOrCreateConn() (*dns.Conn, error) {
+	tc.Lock()
+	defer tc.Unlock()
+	if tc.conn != nil {
+		if IsConnAlive(tc.conn) {
+			return tc.conn, nil
+		}
+		_ = tc.conn.Close()
+		tc.conn = nil
+	}
+	conn, err := tc.CreateConn()
+	if err != nil {
+		return nil, err
+	}
+	tc.conn = conn
+	return tc.conn, nil
+}
+
+func (tc *TCPClient) CreateConn() (*dns.Conn, error) {
+	timeout := TCPTimeoutMillis * time.Millisecond
+	if tc.tlsCfg != nil {
+		return dns.DialTimeoutWithTLS("tcp-tls", tc.serverAddr,
+			tc.tlsCfg, timeout)
+	}
+	return dns.DialTimeout("tcp", tc.serverAddr, timeout)
+}
+
+// IsConnAlive checks if a TCP connection is kept alive.
+func IsConnAlive(conn *dns.Conn) bool {
+	if conn == nil {
+		return false
+	}
+	oneByte := make([]byte, 1)
+	if err := conn.SetReadDeadline(time.Now()); err != nil {
+		return false
+	}
+	if _, err := conn.Read(oneByte); err == io.EOF {
+		return false
+	}
+	if err := conn.SetReadDeadline(time.UnixMilli(0)); err != nil {
+		return false
+	}
+	return true
 }
 
 func NewHTTPSClient(resolverIP string) *http.Client {
