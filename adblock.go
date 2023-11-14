@@ -1,148 +1,162 @@
 package main
 
 import (
-	"io"
+	"github.com/miekg/dns"
 	"log"
 	"net/http"
-	"sort"
-	"strings"
+	"slices"
 	"time"
 )
 
+// AdBlocker represents the component that contains a criteria filter, can tell
+// if a host is blocked based on the filter, and may refresh the filter list.
 type AdBlocker interface {
-	BlockDomain(string)
-	BlockIfMatch(string) bool
+	Block(string) error
+	IsBlocked(string) bool
+	Refresh() error
 }
 
-type oisdAdBlocker struct {
-	resolverAddrs []string
-	resolverProto string
-	oisdListUrl   string
-	blockList     *[]string
-	blockQueue    chan string
-	cache         DNSCache
-}
-
-func NewAdBlocker(cache DNSCache) AdBlocker {
-	bq := make(chan string, 1)
-
-	resolvers := []string{
-		"1.1.1.1:853",
-		"1.0.0.1:853",
-		"[2606:4700:4700::1111]:853",
-		"[2606:4700:4700::1001]:853",
-		"8.8.8.8:853",
-		"8.8.4.4:853",
-		"[2001:4860:4860::8888]:853",
-		"[2001:4860:4860::8844]:853",
+func NewAdBlockerHTTP(resolvers []*ServerConfig, filterURL string) AdBlocker {
+	if len(resolvers) == 0 {
+		log.Panicf("Bootstrap resolvers are empty: %v", resolvers)
 	}
-	ab := oisdAdBlocker{
-		resolverAddrs: resolvers,
-		resolverProto: "tcp",
-		oisdListUrl:   "https://abp.oisd.nl/",
-		blockList:     nil,
-		blockQueue:    bq,
-		cache:         cache,
+	for _, r := range resolvers {
+		if r == nil {
+			log.Panicf("Bootstrap resolvers supplied as nil: %v", resolvers)
+		}
 	}
-
-	ab.processQueue()
-	ab.queueListUpdate()
-
-	return &ab
+	clients := make([]*http.Client, len(resolvers))
+	for i := 0; i < len(resolvers); i++ {
+		clients[i] = NewHTTPSClient(resolvers[i].String())
+	}
+	filter := NewABTreeFilter(FetchFilterByURL(clients, filterURL))
+	return filter
 }
 
-func (ab *oisdAdBlocker) BlockDomain(domainName string) {
-	ab.blockQueue <- domainName
+// ABTreeFilter is an ABFilter implemented with tree of nodes.
+type ABTreeFilter struct {
+	rootNode    *ABTreeFilterNode
+	fetchFilter func() (string, error)
+	filterHash  uint64
+	lastUpdate  time.Time
 }
 
-func (ab *oisdAdBlocker) BlockIfMatch(cname string) bool {
-	cnameR := reverse(cname)
-	i := 0
-	j := len(*ab.blockList) - 1
-	for i <= j {
-		m := (i + j) / 2
-		res := strcmp(cnameR, (*ab.blockList)[m])
-		if res < 0 {
-			j = m - 1
-		} else if res > 0 {
-			i = m + 1
-		} else {
-			domainToBlock := reverse((*ab.blockList)[m])
-			ab.BlockDomain(domainToBlock)
-			//log.Printf("[WRN] Blocking %s", cname)
+// ABTreeFilterNode is a node for ABTreeFilter that uses map for tree structure.
+type ABTreeFilterNode struct {
+	nextLabels map[string]*ABTreeFilterNode
+	isBlocked  bool
+}
+
+func NewABTreeFilterNode() *ABTreeFilterNode {
+	return &ABTreeFilterNode{
+		nextLabels: make(map[string]*ABTreeFilterNode),
+		isBlocked:  false,
+	}
+}
+
+func (rootNode *ABTreeFilterNode) InsertBlockedDomains(domains []string) {
+	if rootNode == nil {
+		panic("Attempted to insert domains into nil *ABTreeFilterNode")
+	}
+	for _, dname := range domains {
+		curr := rootNode
+		cname := dns.CanonicalName(dname)
+		labels := dns.SplitDomainName(cname)
+		slices.Reverse(labels)
+		for _, lbl := range labels {
+			if _, ok := curr.nextLabels[lbl]; !ok {
+				curr.nextLabels[lbl] = NewABTreeFilterNode()
+			}
+			curr = curr.nextLabels[lbl]
+		}
+		curr.isBlocked = true
+	}
+}
+
+func NewABTreeFilter(fetchFilter func() (string, error)) AdBlocker {
+	if fetchFilter == nil {
+		panic("No filter source was given for ABTreeFilter")
+	}
+	abpFilter, ferr := fetchFilter()
+	if ferr != nil {
+		log.Panicf("Unable to fetch the initial ABP filter string: %v", ferr)
+	}
+	domains, perr := ParseABPList(abpFilter)
+	if perr != nil {
+		return nil
+	}
+	f := &ABTreeFilter{
+		rootNode:   NewABTreeFilterNode(),
+		filterHash: HashString(abpFilter),
+		lastUpdate: time.Now(),
+	}
+	f.rootNode.InsertBlockedDomains(domains)
+	return f
+}
+
+func UpdateABTreeFilter(f *ABTreeFilter) error {
+	if f == nil {
+		panic("Attempted to update nil *ABTreeFilter")
+	}
+	abpFilter, ferr := f.fetchFilter()
+	if ferr != nil {
+		return ferr
+	}
+	domains, perr := ParseABPList(abpFilter)
+	if perr != nil {
+		return perr
+	}
+	fh := HashString(abpFilter)
+	if f.filterHash == fh {
+		return nil
+	}
+	rNode := NewABTreeFilterNode()
+	rNode.InsertBlockedDomains(domains)
+	f.lastUpdate = time.Now()
+	f.filterHash = fh
+	f.rootNode = rNode
+	return nil
+}
+
+func (f *ABTreeFilter) Refresh() error {
+	return UpdateABTreeFilter(f)
+}
+
+func (f *ABTreeFilter) Block(dname string) error {
+	if cname := dns.CanonicalName(dname); cname != "." {
+		f.rootNode.InsertBlockedDomains([]string{cname})
+		return nil
+	}
+	return NewInvalidDomainNameError(dname)
+}
+
+func (f *ABTreeFilter) IsBlocked(dname string) bool {
+	curr := f.rootNode
+	cname := dns.CanonicalName(dname)
+	labels := dns.SplitDomainName(cname)
+	slices.Reverse(labels)
+	for _, lbl := range labels {
+		if _, ok := curr.nextLabels[lbl]; !ok {
+			return false
+		}
+		if curr.nextLabels[lbl].isBlocked {
 			return true
 		}
+		curr = curr.nextLabels[lbl]
 	}
 	return false
 }
 
-func (ab *oisdAdBlocker) processQueue() {
-	go func() {
-		for {
-			cname := <-ab.blockQueue
-			ab.cache.ForceResp(cname)
-		}
-	}()
-}
-
-func (ab *oisdAdBlocker) queueListUpdate() {
-	s := ab.updateList()
-	go func(success bool) {
-		for {
-			if success {
-				time.Sleep(time.Hour * 12)
-			} else {
-				time.Sleep(time.Hour * 1)
+func FetchFilterByURL(cs []*http.Client, url string) func() (string, error) {
+	return func() (string, error) {
+		var respBody string
+		var err error
+		for _, c := range cs {
+			if respBody, err = GetBody(c, url); err == nil {
+				return respBody, nil
 			}
-			success = ab.updateList()
+			time.Sleep(1000 * time.Millisecond)
 		}
-	}(s)
-}
-
-func (ab *oisdAdBlocker) updateList() bool {
-	var client *http.Client
-	var resp *http.Response
-	var cname *string
-	var body []byte
-	var err error
-
-	for _, resolverIP := range ab.resolverAddrs {
-		client = NewHTTPSClient(ab.resolverProto, resolverIP)
-		resp, err = client.Get(ab.oisdListUrl)
-		if err == nil {
-			break
-		}
-		client.CloseIdleConnections()
+		return "", err
 	}
-
-	if err != nil {
-		return false
-	}
-
-	defer client.CloseIdleConnections()
-	defer resp.Body.Close()
-
-	body, err = io.ReadAll(resp.Body)
-	if err != nil {
-		return false
-	}
-
-	lines := strings.Split(string(body), "\n")
-
-	var blockList []string
-
-	for i := range lines {
-		cname, err = parseABPSyntax(lines[i])
-		if err == nil {
-			blockList = append(blockList, reverse(*cname))
-		}
-	}
-
-	if len(blockList) > 0 {
-		sort.Strings(blockList)
-		ab.blockList = &blockList
-		log.Printf("%d Adblock entries added from oisd.nl", len(*(ab.blockList)))
-		return true
-	}
-	return false
 }
