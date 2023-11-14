@@ -10,6 +10,10 @@ import (
 var GlobalConfig *LiteDNSConfig
 var OfficialTLDs map[string]struct{}
 
+func main() {
+	Run()
+}
+
 func Run() {
 	if cfg, err := LoadConfig("litedns.conf"); err != nil {
 		log.Fatalf("Unable to load config: %s\n", err.Error())
