@@ -15,7 +15,7 @@ const MaxConfigFileSize = 4096
 const DefaultCacheTTL = 600
 const DefaultMinTTL = 600
 const DefaultMaxTTL = 86400
-const DefaultNegativeCacheTTL = 300
+const DefaultNegativeCacheTTL = 10
 const DefaultCachePurgeInterval = 600
 const DefaultCacheCompactInterval = 1800
 const PortMin = 1
@@ -27,28 +27,19 @@ type RecordType struct {
 	Value uint16
 }
 
-const (
-	TypeA     string = "A"
-	TypeAAAA         = "AAAA"
-	TypeCNAME        = "CNAME"
-	TypeMX           = "MX"
-	TypeNS           = "NS"
-	TypePTR          = "PTR"
-	TypeSOA          = "SOA"
-	TypeSRV          = "SRV"
-	TypeTXT          = "TXT"
-)
+var RecordStrToType map[string]RecordType
 
-var RecordStrToType = map[string]RecordType{
-	TypeA:     {Name: TypeA, Value: dns.TypeA},
-	TypeAAAA:  {Name: TypeAAAA, Value: dns.TypeAAAA},
-	TypeCNAME: {Name: TypeCNAME, Value: dns.TypeCNAME},
-	TypeMX:    {Name: TypeMX, Value: dns.TypeMX},
-	TypeNS:    {Name: TypeNS, Value: dns.TypeNS},
-	TypePTR:   {Name: TypePTR, Value: dns.TypePTR},
-	TypeSOA:   {Name: TypeSOA, Value: dns.TypeSOA},
-	TypeSRV:   {Name: TypeSRV, Value: dns.TypeSRV},
-	TypeTXT:   {Name: TypeTXT, Value: dns.TypeTXT},
+func InitRecordStrToType() {
+	if RecordStrToType != nil {
+		return
+	}
+	RecordStrToType = make(map[string]RecordType)
+	for rType, rTypeStr := range dns.TypeToString {
+		RecordStrToType[rTypeStr] = RecordType{
+			Name:  rTypeStr,
+			Value: rType,
+		}
+	}
 }
 
 func (rt *RecordType) UnmarshalJSON(b []byte) error {
@@ -100,6 +91,7 @@ func (sc *ServerConfig) String() string {
 }
 
 func LoadConfig(filename string) (_ *LiteDNSConfig, err error) {
+	InitRecordStrToType()
 	var configFile *os.File
 	configFile, err = os.Open(filename)
 	if err != nil {

@@ -10,20 +10,26 @@ import (
 var GlobalConfig *LiteDNSConfig
 var OfficialTLDs map[string]struct{}
 
+const CONFIG_FILENAME = "litedns.conf"
+const STAT_PRINT_INTERVAL = 900
+
 func main() {
 	Run()
 }
 
 func Run() {
-	if cfg, err := LoadConfig("litedns.conf"); err != nil {
+	if cfg, err := LoadConfig(CONFIG_FILENAME); err != nil {
 		log.Fatalf("Unable to load config: %s\n", err.Error())
 	} else {
+		log.Printf("Loaded LiteDNS config from %s",
+			CONFIG_FILENAME)
 		GlobalConfig = cfg
 	}
 
 	if tlds, err := LatestTLDs(GlobalConfig.UpstreamServers); err != nil {
 		log.Fatalf("Unable to load IANA TLD list: %s\n", err.Error())
 	} else {
+		log.Printf("Loaded IANA TLD list, total %d", len(tlds))
 		OfficialTLDs = tlds
 	}
 
@@ -65,6 +71,15 @@ func Run() {
 	log.Printf("Starting TCP server at %v\n", tcpAddr.String())
 	udperr := udpServer.ListenAndServe()
 	tcperr := tcpServer.ListenAndServe()
+
+	go func() {
+		StatTimer := time.NewTicker(STAT_PRINT_INTERVAL * time.Second)
+		for {
+			<-StatTimer.C
+			PrintStat()
+		}
+	}()
+
 	defer func(udpSrv, tcpSrv *dns.Server) {
 		sderr1 := udpSrv.Shutdown()
 		sderr2 := tcpSrv.Shutdown()

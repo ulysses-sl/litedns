@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"github.com/miekg/dns"
 	"io"
@@ -20,6 +21,8 @@ const (
 	TLSProto     = "tcp-tls"
 )
 const TCPTimeoutMillis = 1000
+const TCPBackOffMillis = 10
+const TCPMaxRetry = 3
 
 type DNSClient interface {
 	Exchange(*dns.Msg) (*dns.Msg, error)
@@ -31,11 +34,11 @@ type UDPClient struct {
 }
 
 type TCPClient struct {
-	sync.Mutex
 	client     *dns.Client
 	conn       *dns.Conn
 	tlsCfg     *tls.Config
 	serverAddr string
+	sync.Mutex
 }
 
 type DefaultClient struct {
@@ -159,12 +162,42 @@ func (tc *TCPClient) Exchange(req *dns.Msg) (*dns.Msg, error) {
 			"attempted to use uninitialized DNS client")
 	}
 	var resp *dns.Msg
-	conn, err := tc.GetOrCreateConn()
+	var err error
+	tc.Lock()
+	defer tc.Unlock()
+	if tc.conn == nil {
+		tc.conn, err = tc.CreateConn()
+		if err != nil {
+			return nil, err
+		}
+	}
+	resp, _, err = tc.client.ExchangeWithConn(req, tc.conn)
+	// retry with new connection if connection closed
+	if err == nil && resp != nil {
+		return resp, nil
+	}
+	backoff := time.Duration(TCPBackOffMillis) * time.Millisecond
+	for i := 0; i < TCPMaxRetry; i++ {
+		_ = tc.conn.Close()
+		tc.conn = nil
+		time.Sleep(backoff)
+		backoff *= 2
+		tc.conn, err = tc.CreateConn()
+		if err != nil {
+			return nil, err
+		}
+		resp, _, err = tc.client.ExchangeWithConn(req, tc.conn)
+		if err == nil && resp != nil {
+			return resp, nil
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
-	resp, _, err = tc.client.ExchangeWithConn(req, conn)
-	return resp, err
+	if resp == nil {
+		return nil, errors.New("connection failed")
+	}
+	return resp, nil
 }
 
 func (tc *TCPClient) GetOrCreateConn() (*dns.Conn, error) {
@@ -206,7 +239,7 @@ func IsConnAlive(conn *dns.Conn) bool {
 	if _, err := conn.Read(oneByte); err == io.EOF {
 		return false
 	}
-	if err := conn.SetReadDeadline(time.UnixMilli(0)); err != nil {
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
 		return false
 	}
 	return true

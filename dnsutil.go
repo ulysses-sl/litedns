@@ -122,11 +122,9 @@ func CreateUpstreamRequest(req *dns.Msg) *dns.Msg {
 	uReq.Opcode = req.Opcode
 	uReq.Question = CloneSlice(req.Question)
 	uReq.Extra = make([]dns.RR, 0, 1)
-	if opt := req.IsEdns0(); opt != nil {
-		uReq.SetEdns0(opt.UDPSize(), opt.Do())
-	} else {
-		uReq.SetEdns0(EDNS_BUFFER_SIZE, true)
-	}
+	uReq.SetEdns0(EDNS_BUFFER_SIZE, true)
+	uReq.AuthenticatedData = true
+	uReq.RecursionDesired = true
 	uReq.CheckingDisabled = true
 	return uReq
 }
@@ -155,11 +153,12 @@ func ReverseQueryToIP(s string) (net.IP, error) {
 	cname := dns.CanonicalName(s)
 	if revIP4Str, ok := strings.CutSuffix(cname, PTRSuffix4); ok {
 		ipSegments := strings.Split(revIP4Str, ".")
-		if len(ipSegments) != 4 {
+		if len(ipSegments) < 4 {
 			return nil, fmt.Errorf(
 				"malformed IPv4 reverse search query: %s", s)
 		}
 		slices.Reverse(ipSegments)
+		ipSegments = ipSegments[:4]
 		ipStr := strings.Join(ipSegments, ".")
 		ipAddr := net.ParseIP(ipStr)
 		if ipAddr == nil {
@@ -170,11 +169,12 @@ func ReverseQueryToIP(s string) (net.IP, error) {
 	}
 	if revIP6Str, ok := strings.CutSuffix(cname, PTRSuffix6); ok {
 		ipNibbles := strings.Split(revIP6Str, ".")
-		if len(ipNibbles) != 32 {
+		if len(ipNibbles) < 32 {
 			return nil, fmt.Errorf(
 				"malformed IPv6 reverse search query: %s", s)
 		}
 		slices.Reverse(ipNibbles)
+		ipNibbles = ipNibbles[:32]
 		ipSegments := make([]string, 0, 8)
 		for i := 0; i < len(ipNibbles); i += 4 {
 			seg := strings.Join([]string{
@@ -226,12 +226,21 @@ func IsLocalQuery(q *dns.Msg) bool {
 	if len(labels) < 2 {
 		return true
 	}
-	if _, isTLD := OfficialTLDs[labels[len(labels)]]; !isTLD {
+	if labels[len(labels)-1] == "arpa" {
+		subdomain := labels[len(labels)-2]
+		if subdomain == "in-addr" || subdomain == "ip6" {
+			goto CheckIP
+		}
+	}
+	if _, isTLD := OfficialTLDs[labels[len(labels)-1]]; isTLD {
 		return false
 	}
+
+CheckIP:
 	// Check if it contains the IP address that should not be leaked
 	ip, err := ReverseQueryToIP(cname)
 	if err != nil {
+		log.Printf("%v", err)
 		return true
 	}
 	if ip != nil {

@@ -13,24 +13,20 @@ type DNSRecord struct {
 	expiry  UnixTimestamp
 }
 
-func currentUnixTime() UnixTimestamp {
+func CurrentUnixTime() UnixTimestamp {
 	return UnixTimestamp(time.Now().Unix())
 }
 
-func (expiry UnixTimestamp) before(t UnixTimestamp) bool {
-	return expiry <= t
-}
-
 func NewExpiry(ttl int64) UnixTimestamp {
-	return currentUnixTime() + UnixTimestamp(ttl)
+	return CurrentUnixTime() + UnixTimestamp(ttl)
 }
 
 func (expiry UnixTimestamp) GetTTL() uint32 {
-	now := currentUnixTime()
-	if expiry.before(now) {
+	now := CurrentUnixTime()
+	diff := expiry - now
+	if diff <= 0 {
 		return 0
 	}
-	diff := now - expiry
 	if diff > DefaultMaxTTL {
 		return DefaultMaxTTL
 	}
@@ -38,7 +34,7 @@ func (expiry UnixTimestamp) GetTTL() uint32 {
 }
 
 func (r DNSRecord) IsExpired() bool {
-	return r.expiry <= currentUnixTime()
+	return r.expiry <= CurrentUnixTime()
 }
 
 func (r DNSRecord) TTLAdjustedEntry() *dns.Msg {

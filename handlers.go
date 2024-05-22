@@ -44,9 +44,12 @@ func (h *MainHandler) QueryWithClient(req *dns.Msg) *dns.Msg {
 }
 
 func (h *MainHandler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
+	logRequest, logEntry := StartLogEntry()
+	var resp *dns.Msg
 	defer func() {
 		if err := w.Close(); err != nil {
-			log.Printf("Error closing the connection: %s", err.Error())
+			log.Printf("Error while closing the connection: %s",
+				err.Error())
 		}
 	}()
 	if h == nil {
@@ -56,26 +59,42 @@ func (h *MainHandler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		log.Panicf("Attempted to handle nil DNS request")
 	}
 	if req.Response {
-		ServeResponse(w, CreateServFailResp(req))
+		resp = CreateServFailResp(req)
+		ServeResponse(w, resp)
+		log.Printf("Warning: Received a response instead of a query")
+		PopulateLogEntry(logEntry, resp)
+		logRequest(logEntry)
 		return
 	}
 	if len(req.Question) != 1 {
-		ServeResponse(w, CreateServFailResp(req))
+		resp = CreateServFailResp(req)
+		ServeResponse(w, resp)
+		log.Printf("Warning: Invalid number of questions in a query (%d)",
+			len(req.Question))
+		PopulateLogEntry(logEntry, resp)
+		logRequest(logEntry)
 		return
 	}
 	if req.Question[0].Qclass != dns.ClassINET {
-		ServeResponse(w, CreateServFailResp(req))
+		ServeResponse(w, resp)
+		log.Printf("Warning: Received a non-ClassINET query")
+		PopulateLogEntry(logEntry, resp)
+		logRequest(logEntry)
 		return
 	}
 	var client DNSClient
-	if IsLocalQuery(req) {
+	if logEntry.isLocalReq = IsLocalQuery(req); logEntry.isLocalReq {
 		client = <-h.localResolvClients.C
 	} else {
 		client = <-h.upstreamClients.C
 	}
 	cname := dns.CanonicalName(req.Question[0].Name)
 	if h.adBlocker.IsBlocked(cname) {
-		ServeResponse(w, CreateBlockedResp(req))
+		resp = CreateBlockedResp(req)
+		ServeResponse(w, resp)
+		logEntry.cacheStatus = BlockedDomain
+		PopulateLogEntry(logEntry, resp)
+		logRequest(logEntry)
 		return
 	}
 
@@ -88,26 +107,42 @@ func (h *MainHandler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	switch {
 	case err == nil:
 		if cachedResp != nil {
-			h.inflightMgr.ReleaseSession(sessionKey)
-			ServeResponse(w, CreateRespFromResp(req, cachedResp))
+			resp = CreateRespFromResp(req, cachedResp)
+			ServeResponse(w, resp)
+			logEntry.cacheStatus = CacheHit
+			PopulateLogEntry(logEntry, resp)
+			logRequest(logEntry)
 			return
 		}
+		logEntry.cacheStatus = CacheMiss
 		shouldCacheResult = true
 	case errors.Is(err, ExpiredCacheError):
+		logEntry.cacheStatus = CacheExpired
 		shouldCacheResult = true
 	case errors.Is(err, UnsupportedCachingError):
+		logEntry.cacheStatus = BypassCache
 		shouldCacheResult = false
 	default:
-		ServeResponse(w, CreateServFailResp(req))
+		resp = CreateServFailResp(req)
+		ServeResponse(w, resp)
+		logEntry.cacheStatus = CacheError
+		PopulateLogEntry(logEntry, resp)
+		logRequest(logEntry)
 		return
 	}
 
 	if !isFirst {
 		<-session.Wait
-		ServeResponse(w, CreateRespFromResp(req, session.Cached))
+		resp = CreateRespFromResp(req, session.Cached)
+		ServeResponse(w, resp)
+		PopulateLogEntry(logEntry, resp)
+		logRequest(logEntry)
 		return
 	}
 	session.Cached = h.MakeQueryRequest(client, req)
+	if session.Cached == nil {
+		session.Cached = CreateServFailResp(req)
+	}
 	if h.ContainsBlockedTarget(session.Cached) {
 		if berr := h.adBlocker.Block(cname); berr != nil {
 			log.Printf("Failed to block req %v: %v", req.String(), berr)
@@ -119,17 +154,20 @@ func (h *MainHandler) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 			log.Printf("Unable to cache upstream resp: %s", err.Error())
 		}
 	}
-	ServeResponse(w, CreateRespFromResp(req, session.Cached))
+	resp = CreateRespFromResp(req, session.Cached)
+	ServeResponse(w, resp)
+	PopulateLogEntry(logEntry, resp)
+	logRequest(logEntry)
 }
 
 func (h *MainHandler) MakeQueryRequest(client DNSClient, req *dns.Msg) *dns.Msg {
-	var resp *dns.Msg
 	uReq := CreateUpstreamRequest(req)
-	uResp, err := client.Exchange(uReq)
+
+	resp, err := client.Exchange(uReq)
 	if err != nil {
 		return nil
 	}
-	if uResp == nil {
+	if resp == nil {
 		resp = new(dns.Msg)
 		resp.SetRcode(req, dns.RcodeServerFailure)
 		return resp
@@ -138,6 +176,9 @@ func (h *MainHandler) MakeQueryRequest(client DNSClient, req *dns.Msg) *dns.Msg 
 }
 
 func (h *MainHandler) ContainsBlockedTarget(resp *dns.Msg) bool {
+	if resp == nil {
+		return false
+	}
 	switch resp.Question[0].Qtype {
 	case dns.TypeCNAME:
 		for _, rr := range resp.Answer {

@@ -8,6 +8,17 @@ import (
 	"time"
 )
 
+type CacheStatus int
+
+const (
+	CacheError CacheStatus = iota
+	CacheHit
+	CacheMiss
+	CacheExpired
+	BypassCache
+	BlockedDomain
+)
+
 type cacheKey struct {
 	cname   string
 	session string
@@ -52,6 +63,9 @@ func NewDNSCache(cfg *DNSCacheConfig) DNSCache {
 		cachedType: make(map[int32]struct{}),
 		cacheTTL:   cfg.CacheTTL,
 		ForceFlush: forceFlush,
+	}
+	for _, rrType := range cfg.RecordTypes {
+		ch.cachedType[int32(rrType.Value)] = struct{}{}
 	}
 	purgingInterval := DefaultCachePurgeInterval * time.Second
 	compactInterval := DefaultCacheCompactInterval * time.Second
@@ -114,6 +128,9 @@ func (ch *DNSMapCache) Query(q *dns.Msg, session string) (*dns.Msg, error) {
 	cached, ok := ch.lruCache.Get(i)
 	if !ok {
 		return nil, nil
+	}
+	if cached.IsExpired() {
+		return nil, ExpiredCacheError
 	}
 	return cached.TTLAdjustedEntry(), nil
 }

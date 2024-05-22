@@ -16,7 +16,7 @@
       "ip": "192.168.0.1",
       "port": 53,
       "proto": "default"
-    },
+    }
   ],
   "listenerConfig": {
     "ip": "::",
@@ -24,7 +24,7 @@
     "proto": "default"
   },
   "adBlocker": {
-    "blockListUrl": "https://big.oisd.nl/",
+    "abpFilterUrl": "https://big.oisd.nl/",
     "sinkIP4": "0.0.0.0",
     "sinkIP6": "::"
   },
@@ -36,5 +36,5 @@
       "AAAA",
       "CNAME"
     ]
-  },
+  }
 }

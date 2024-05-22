@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -11,6 +12,7 @@ func LatestTLDs(resolvers []*ServerConfig) (map[string]struct{}, error) {
 	var err error
 	tlds := make(map[string]struct{})
 	for _, r := range resolvers {
+		log.Printf("Creating HTTPS client from resolver %v", r.String())
 		c := NewHTTPSClient(r.String())
 		resp, err = c.Get(TLDListURL)
 		c.CloseIdleConnections()
@@ -19,7 +21,7 @@ func LatestTLDs(resolvers []*ServerConfig) (map[string]struct{}, error) {
 		}
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf(
-				"unable to fetch TLD list from IANA: HTTP code %d",
+				"unable to fetch TLD list from IANA: HTTP status code %d",
 				resp.StatusCode)
 		}
 		if tldStr, rerr := ReadAllString(resp.Body); rerr != nil {
@@ -27,8 +29,7 @@ func LatestTLDs(resolvers []*ServerConfig) (map[string]struct{}, error) {
 			continue
 		} else {
 			tldsList := strings.Split(tldStr, "\n")
-			i := 0
-			for i < len(tldsList) {
+			for i := 0; i < len(tldsList); i++ {
 				if !strings.HasPrefix(tldsList[i], "#") {
 					tlds[tldsList[i]] = struct{}{}
 				}

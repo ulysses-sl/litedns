@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/miekg/dns"
+	"net/netip"
 	"strings"
 	"sync"
 )
@@ -31,12 +32,18 @@ func NewInflightManager() *InflightManager {
 // InflightSessionKey generates the session key based on the server IP address,
 // client IP address, and DNS query.
 func InflightSessionKey(w dns.ResponseWriter, req *dns.Msg) string {
-	lAddr := w.LocalAddr()
-	rAddr := w.RemoteAddr()
+	var localAddr, remoteAddr string
+	localAddr = w.LocalAddr().String()
+	rAddr, err := netip.ParseAddrPort(w.RemoteAddr().String())
+	if err != nil {
+		remoteAddr = w.RemoteAddr().String()
+	} else {
+		remoteAddr = rAddr.Addr().String()
+	}
 	q := req.Question[0]
 	key := []string{
-		lAddr.String(),
-		rAddr.String(),
+		localAddr,
+		remoteAddr,
 		dns.CanonicalName(q.Name),
 		dns.Class(q.Qclass).String(),
 		dns.Type(q.Qtype).String(),

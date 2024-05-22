@@ -53,6 +53,7 @@ func NewLRUCache[T any](maxSize int) *LRUCache[T] {
 	head := &dlNode{
 		idx: -1,
 	}
+	head.prev, head.next = head, head
 	c := &LRUCache[T]{
 		data:    make([]cacheData[T], 0, maxSize),
 		head:    head,
@@ -103,7 +104,10 @@ func (c *LRUCache[T]) Delete(i int) (T, bool) {
 	var found bool
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	if found = i >= 0 && i < len(c.data) && c.data[i].node != nil; found {
+	if i < 0 || i >= len(c.data) {
+		return rv, false
+	}
+	if found = c.data[i].node != nil; found {
 		rv = c.data[i].value
 		node := c.data[i].node.extract()
 		c.data[i].node = nil
@@ -120,13 +124,17 @@ func (c *LRUCache[T]) Purge(shouldDelete func(T) bool) []T {
 	defer c.mutex.Unlock()
 	purged = make([]T, 0)
 	for i := 0; i < len(c.data); i++ {
-		if shouldDelete(c.data[i].value) {
-			purged = append(purged, c.data[i].value)
-			node := c.data[i].node.extract()
-			c.data[i].node = nil
-			node.next = c.unused
-			c.unused = node
+		if !shouldDelete(c.data[i].value) {
+			continue
 		}
+		purged = append(purged, c.data[i].value)
+		if c.data[i].node == nil {
+			continue
+		}
+		node := c.data[i].node.extract()
+		c.data[i].node = nil
+		node.next = c.unused
+		c.unused = node
 	}
 	c.size -= len(purged)
 	return purged
